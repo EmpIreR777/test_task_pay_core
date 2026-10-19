@@ -1,0 +1,136 @@
+x-backend-common: &backend-common
+  image: payment_processing-backend:latest
+  build:
+    context: ./backend
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  networks:
+    - app-network
+
+services:
+  migrator:
+    <<: *backend-common
+    container_name: payment_processing-migrator
+    command: ["python", "-m", "src.run_migrations"]
+    depends_on:
+      backend-db:
+        condition: service_healthy
+    restart: on-failure
+
+  api:
+    <<: *backend-common
+    container_name: payment_processing-api
+    command: ["uvicorn", "src.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      backend-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  consumer:
+    <<: *backend-common
+    container_name: payment_processing-consumer
+    command: ["faststream", "run", "src.tasks.consumer:app"]
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      backend-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    # FastStream гасит приложение сам, но воркеру нужно время дописать
+    # сообщение, которое уже в работе.
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; socket.create_connection(('rabbitmq', 5672), 3).close()
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  outbox-processor:
+    <<: *backend-common
+    container_name: payment_processing-outbox-processor
+    command: ["faststream", "run", "src.tasks.outbox_processor:app"]
+    depends_on:
+      migrator:
+        condition: service_completed_successfully
+      backend-db:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import socket; socket.create_connection(('rabbitmq', 5672), 3).close()
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  backend-db:
+    image: postgres:16
+    container_name: payment_processing-db
+    ports:
+      - "5432:5432"
+    env_file: ".env"
+    volumes:
+      - backend-db-volume:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - app-network
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: payment_processing-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_DEFAULT_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_DEFAULT_PASS:-guest}
+    ports:
+      - "5672:5672"    # AMQP
+      - "15672:15672"  # UI управления
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - app-network
+
+volumes:
+  backend-db-volume:
+  rabbitmq_data:
+
+networks:
+  app-network:
+    driver: bridge

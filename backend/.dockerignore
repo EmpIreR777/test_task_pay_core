@@ -1,0 +1,22 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.venv/
+.venv*/
+.ruff_cache/
+.mypy_cache/
+.pytest_cache/
+.git/
+.gitignore
+.DS_Store
+README.md
+PLAN.md
+docs/
+# These are needed for the Docker build:
+!alembic.ini
+!pyproject.toml
+!uv.lock
+!alembic/
+!tests/
+*.cfg
